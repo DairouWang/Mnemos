@@ -375,46 +375,51 @@ class Mnemos {
       grad.addColorStop(1, `rgba(200, 175, 130, 0)`);
       return grad;
     };
-    
-    // Outer glow - gold with soft horizontal fade
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(this.width, y);
-    ctx.strokeStyle = createHorizontalGradient((pulseIntensity + fastPulse) * 0.1);
-    ctx.lineWidth = 14;
-    ctx.stroke();
-    
-    // Middle glow
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(this.width, y);
-    ctx.strokeStyle = createHorizontalGradient((pulseIntensity + fastPulse) * 0.2);
-    ctx.lineWidth = 5;
-    ctx.stroke();
-    
-    // Core line - bright gold with soft edges
-    const coreGrad = ctx.createLinearGradient(0, y, this.width, y);
-    coreGrad.addColorStop(0, `rgba(230, 210, 170, 0)`);
-    coreGrad.addColorStop(0.04, `rgba(230, 210, 170, ${pulseIntensity + fastPulse + 0.1})`);
-    coreGrad.addColorStop(0.5, `rgba(240, 220, 180, ${pulseIntensity + fastPulse + 0.15})`);
-    coreGrad.addColorStop(0.96, `rgba(230, 210, 170, ${pulseIntensity + fastPulse + 0.1})`);
-    coreGrad.addColorStop(1, `rgba(230, 210, 170, 0)`);
-    
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(this.width, y);
-    ctx.strokeStyle = coreGrad;
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    
-    // Scanning highlight moving along axis
+
+    // Scanning highlight first (with top/bottom faded mask), then axis on top so axis stays solid
     const scanX = (this.time * 35) % (this.width + 200) - 100;
     const scanGradient = ctx.createRadialGradient(scanX, y, 0, scanX, y, 70);
     scanGradient.addColorStop(0, 'rgba(240, 220, 180, 0.15)');
     scanGradient.addColorStop(0.5, 'rgba(220, 195, 150, 0.05)');
     scanGradient.addColorStop(1, 'rgba(200, 175, 130, 0)');
     ctx.fillStyle = scanGradient;
-    ctx.fillRect(scanX - 70, y - 20, 140, 40);
+    ctx.fillRect(scanX - 70, y - 24, 140, 48);
+    // Vertical fade mask: fade out at top and bottom
+    ctx.globalCompositeOperation = 'destination-in';
+    const fadeGradient = ctx.createLinearGradient(scanX, y - 24, scanX, y + 24);
+    fadeGradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    fadeGradient.addColorStop(0.35, 'rgba(255, 255, 255, 1)');
+    fadeGradient.addColorStop(0.65, 'rgba(255, 255, 255, 1)');
+    fadeGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = fadeGradient;
+    ctx.fillRect(scanX - 70, y - 24, 140, 48);
+    ctx.globalCompositeOperation = 'source-over';
+
+    // Main axis on top - always solid
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(this.width, y);
+    ctx.strokeStyle = createHorizontalGradient((pulseIntensity + fastPulse) * 0.1);
+    ctx.lineWidth = 14;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(this.width, y);
+    ctx.strokeStyle = createHorizontalGradient((pulseIntensity + fastPulse) * 0.2);
+    ctx.lineWidth = 5;
+    ctx.stroke();
+    const coreGrad = ctx.createLinearGradient(0, y, this.width, y);
+    coreGrad.addColorStop(0, `rgba(230, 210, 170, 0)`);
+    coreGrad.addColorStop(0.04, `rgba(230, 210, 170, ${pulseIntensity + fastPulse + 0.1})`);
+    coreGrad.addColorStop(0.5, `rgba(240, 220, 180, ${pulseIntensity + fastPulse + 0.15})`);
+    coreGrad.addColorStop(0.96, `rgba(230, 210, 170, ${pulseIntensity + fastPulse + 0.1})`);
+    coreGrad.addColorStop(1, `rgba(230, 210, 170, 0)`);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(this.width, y);
+    ctx.strokeStyle = coreGrad;
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 
   drawYearLines() {
