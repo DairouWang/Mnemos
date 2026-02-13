@@ -1,4 +1,5 @@
-// Mnemos - Timeline Memory Visualization Engine
+// Mnemos v2.0 - Timeline Memory Visualization Engine
+// Pan, zoom, temporal focus, event weight, parallax depth, sparse years
 import { TIME_RANGE, historicalEvents, personalEvents } from './data.js';
 
 class Mnemos {
@@ -6,51 +7,84 @@ class Mnemos {
     this.canvas = document.getElementById('main-canvas');
     this.ctx = this.canvas.getContext('2d');
     this.container = document.getElementById('canvas-container');
-    
+
     // Dimensions
     this.width = window.innerWidth;
     this.height = window.innerHeight;
-    
+
     // Timeline config
     this.timeRange = TIME_RANGE;
     this.yearCount = this.timeRange.end - this.timeRange.start + 1;
-    
-    // Layout parameters - more vertical whitespace
+
+    // Layout – vertical breathing space (timeline never touches top/bottom)
     this.padding = { left: 60, right: 60 };
     this.mainAxisY = this.height * 0.5;
-    this.verticalExtent = 0.28; // Lines only extend 28% above/below center
-    
-    // Year line parameters
+    this.verticalExtent = 0.28;
+
+    // Time scale: base width per year; actual width = base * zoomScale
+    this.baseYearWidth = (this.width - this.padding.left - this.padding.right) / (this.yearCount - 1);
+    this.yearWidth = this.baseYearWidth;
+    this.zoomScale = 1;
+    this.zoomTarget = 1;
+    this.zoomMin = 0.4;
+    this.zoomMax = 4.5; // Increased for wider spacing when zoomed in
+    this.zoomEase = 0.08; // Balanced zoom speed - responsive but smooth
+    this.zoomSensitivity = 0.003;
+    this.zoomAnchorX = null;
+    this.zoomAnchorIndex = null;
+    this.zoomGestureUntil = 0;
+
+    // Horizontal pan (time dragging) – physical, weighted feel
+    this.panOffset = 0;
+    this.panVelocity = 0;
+    this.isDragging = false;
+    this.dragStartX = 0;
+    this.dragStartPan = 0;
+    this.lastPanX = 0;
+    this.lastPanTime = 0;
+    this.panFriction = 0.92;
+    this.panDecay = 0.96;
+
+    // Temporal focus – default center year, subtle highlight
+    this.focusYear = 1890;
+    this.focusIntensityBoost = 0.12;
+
+    // Parallax depth – upper zone further (slower), lower closer (faster)
+    this.parallaxUpper = 0.985;
+    this.parallaxLower = 1.018;
+    this.centerX = this.width * 0.5;
+
+    // Year line cache (year, phase, flicker, events – x computed each frame from pan/zoom)
     this.yearLines = [];
-    this.yearWidth = (this.width - this.padding.left - this.padding.right) / (this.yearCount - 1);
-    
-    // Interaction state
+
+    // Interaction state (hover reset while dragging)
     this.hoveredYear = null;
     this.mouseX = 0;
     this.mouseY = 0;
-    
+
     // Animation
     this.time = 0;
     this.lastTime = 0;
-    
+
     // Particle system for ambient effect
     this.particles = [];
     this.maxParticles = 40;
-    
+
     // Event text element cache
     this.eventElements = [];
-    
-    // Smooth transitions
-    this.transitionSpeed = 0.12;
+
+    // Smooth transitions – slower for breathing feel
+    this.transitionSpeed = 0.04;
     this.currentIntensities = {};
     this.currentScales = {};
-    
+
     this.init();
   }
   
   init() {
     this.resize();
     this.createYearLines();
+    this.centerOnFocusYear();
     this.initParticles();
     this.bindEvents();
     this.animate();
@@ -84,32 +118,50 @@ class Mnemos {
     this.canvas.style.width = this.width + 'px';
     this.canvas.style.height = this.height + 'px';
     this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-    
+
     this.mainAxisY = this.height * 0.5;
-    this.yearWidth = (this.width - this.padding.left - this.padding.right) / (this.yearCount - 1);
-    
-    // Recalculate year line positions
-    this.yearLines.forEach((line, i) => {
-      line.x = this.padding.left + i * this.yearWidth;
-    });
+    this.centerX = this.width * 0.5;
+    this.baseYearWidth = (this.width - this.padding.left - this.padding.right) / (this.yearCount - 1);
+    this.yearWidth = this.baseYearWidth * this.zoomScale;
+
+    const [panMin, panMax] = this.getPanBounds();
+    this.panOffset = Math.max(panMin, Math.min(panMax, this.panOffset));
   }
-  
+
+  // Pan bounds so timeline stays within view (no scrollbar)
+  getPanBounds(yearWidth = this.yearWidth) {
+    const totalWidth = (this.yearCount - 1) * yearWidth;
+    const viewWidth = this.width - this.padding.left - this.padding.right;
+    const maxPan = Math.max(0, totalWidth - viewWidth);
+    return [0, maxPan];
+  }
+
+  // Screen x for year index (pan + zoom applied)
+  getYearLineX(yearIndex) {
+    return this.padding.left + yearIndex * this.yearWidth - this.panOffset;
+  }
+
   createYearLines() {
+    this.yearLines = [];
+
+    // Create entries for ALL years (including empty ones) to preserve true time spacing
+    // Empty years won't draw lines, but they occupy their temporal position
     for (let i = 0; i < this.yearCount; i++) {
       const year = this.timeRange.start + i;
-      const x = this.padding.left + i * this.yearWidth;
-      
+      const hist = historicalEvents[year] || [];
+      const personal = personalEvents[year] || [];
+      const hasEvents = hist.length > 0 || personal.length > 0;
+
       this.yearLines.push({
         year,
-        x,
-        // Each line has unique phase and frequency
+        yearIndex: i,
+        hasEvents,
         phase: Math.random() * Math.PI * 2,
         flickerSpeed: 0.4 + Math.random() * 1.2,
         pulseSpeed: 0.2 + Math.random() * 0.3,
         baseIntensity: 0.25 + Math.random() * 0.15,
-        // Event data
-        historicalEvents: historicalEvents[year] || [],
-        personalEvents: personalEvents[year] || []
+        historicalEvents: hist,
+        personalEvents: personal
       });
     }
   }
@@ -117,45 +169,137 @@ class Mnemos {
   bindEvents() {
     window.addEventListener('resize', () => {
       this.resize();
-      this.createYearLines();
+      const [panMin, panMax] = this.getPanBounds();
+      this.panOffset = Math.max(panMin, Math.min(panMax, this.panOffset));
     });
-    
-    this.canvas.addEventListener('mousemove', (e) => {
-      this.mouseX = e.clientX;
-      this.mouseY = e.clientY;
-      this.updateHoveredYear();
-    });
-    
-    this.canvas.addEventListener('mouseleave', () => {
+
+    // Horizontal pan – physical drag (hover reset while dragging)
+    this.canvas.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      this.isDragging = true;
       this.hoveredYear = null;
       this.clearEventTexts();
+      this.dragStartX = e.clientX;
+      this.dragStartPan = this.panOffset;
+      this.panVelocity = 0;
+      this.lastPanX = e.clientX;
+      this.lastPanTime = performance.now();
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      this.mouseX = e.clientX;
+      this.mouseY = e.clientY;
+      if (this.isDragging) {
+        const dx = e.clientX - this.dragStartX;
+        this.panOffset = this.dragStartPan - dx;
+        const now = performance.now();
+        const dt = (now - this.lastPanTime) / 1000;
+        if (dt > 0) this.panVelocity = (this.lastPanX - e.clientX) / dt;
+        this.lastPanX = e.clientX;
+        this.lastPanTime = now;
+        const [panMin, panMax] = this.getPanBounds();
+        this.panOffset = Math.max(panMin, Math.min(panMax, this.panOffset));
+      } else {
+        this.updateHoveredYear();
+      }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (e.button !== 0) return;
+      if (this.isDragging) {
+        this.isDragging = false;
+        // Keep a bit of velocity for physical feel (weighted)
+        this.panVelocity *= 0.3;
+      }
+    });
+
+    // Scroll zoom – mouse-centered with gesture lock (no horizontal drifting)
+    this.canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      // Disable hover visuals during zoom
+      this.hoveredYear = null;
+      this.clearEventTexts();
+      const now = performance.now();
+      // Lock anchor per wheel gesture so zoom stays stable
+      if (now > this.zoomGestureUntil || this.zoomAnchorX === null || this.zoomAnchorIndex === null) {
+        this.zoomAnchorX = this.mouseX;
+        this.zoomAnchorIndex = (this.zoomAnchorX - this.padding.left + this.panOffset) / this.yearWidth;
+      }
+
+      // Exponential zoom gives smooth continuous response and faster feel
+      const factor = Math.exp(-e.deltaY * this.zoomSensitivity);
+      this.zoomTarget = Math.max(this.zoomMin, Math.min(this.zoomMax, this.zoomTarget * factor));
+      this.zoomGestureUntil = now + 130;
+      this.panVelocity = 0;
+    }, { passive: false });
+
+    this.canvas.addEventListener('mouseleave', () => {
+      if (!this.isDragging) {
+        this.hoveredYear = null;
+        this.clearEventTexts();
+      }
     });
   }
-  
-  updateHoveredYear() {
-    let closestLine = null;
-    let closestDist = Infinity;
-    
-    // Calculate the visible vertical bounds
+
+  // Center timeline on focus year (used on load and when restoring focus feel)
+  centerOnFocusYear() {
+    const focusIndex = this.focusYear - this.timeRange.start;
+    if (focusIndex < 0 || focusIndex >= this.yearCount) return;
+    this.yearWidth = this.baseYearWidth * this.zoomScale;
+    this.panOffset = this.padding.left + focusIndex * this.yearWidth - this.centerX;
+    const [panMin, panMax] = this.getPanBounds();
+    this.panOffset = Math.max(panMin, Math.min(panMax, this.panOffset));
+  }
+
+  // Check whether the mouse is currently over the timeline band
+  isMouseWithinTimeline() {
     const extent = this.height * this.verticalExtent;
     const topBound = this.mainAxisY - extent * 0.8;
     const bottomBound = this.mainAxisY + extent * 0.8;
-    
-    // Only trigger hover if mouse is within the timeline region
     const isInVerticalRange = this.mouseY >= topBound && this.mouseY <= bottomBound;
-    const isInHorizontalRange = this.mouseX >= this.padding.left - 20 && 
-                                 this.mouseX <= this.width - this.padding.right + 20;
-    
+    const isInHorizontalRange = this.mouseX >= this.padding.left - 20 &&
+      this.mouseX <= this.width - this.padding.right + 20;
+    return isInVerticalRange && isInHorizontalRange;
+  }
+
+  // Year index used as zoom anchor – mouse position if within band, otherwise center
+  getZoomAnchorYearIndex() {
+    const effectiveX = this.isMouseWithinTimeline() ? this.mouseX : this.centerX;
+    return (effectiveX - this.padding.left + this.panOffset) / this.yearWidth;
+  }
+
+  // Hover should stay disabled while zoom gesture/easing is active
+  isZooming() {
+    return this.zoomAnchorIndex !== null || Math.abs(this.zoomTarget - this.zoomScale) > 0.0008;
+  }
+
+  updateHoveredYear() {
+    if (this.isDragging || this.isZooming()) return;
+    let closestLine = null;
+    let closestDist = Infinity;
+
+    const extent = this.height * this.verticalExtent;
+    const topBound = this.mainAxisY - extent * 0.8;
+    const bottomBound = this.mainAxisY + extent * 0.8;
+
+    const isInVerticalRange = this.mouseY >= topBound && this.mouseY <= bottomBound;
+    const isInHorizontalRange = this.mouseX >= this.padding.left - 20 &&
+      this.mouseX <= this.width - this.padding.right + 20;
+
     if (isInVerticalRange && isInHorizontalRange) {
+      // Always find the closest year with events (no distance cap)
+      // so hovering between years still lights up the neighborhood
       for (const line of this.yearLines) {
-        const dist = Math.abs(this.mouseX - line.x);
-        if (dist < closestDist && dist < this.yearWidth * 0.5) {
+        if (!line.hasEvents) continue;
+        const x = this.getYearLineX(line.yearIndex);
+        const dist = Math.abs(this.mouseX - x);
+        if (dist < closestDist) {
           closestDist = dist;
           closestLine = line;
         }
       }
     }
-    
+
     if (this.hoveredYear !== closestLine) {
       this.hoveredYear = closestLine;
       this.updateEventTexts();
@@ -164,64 +308,140 @@ class Mnemos {
   
   updateEventTexts() {
     this.clearEventTexts();
-    
+
     if (!this.hoveredYear) return;
-    
-    const line = this.hoveredYear;
-    const x = line.x;
-    
-    // Show year label
-    this.showYearLabel(line.year, x);
-    
-    // Historical events (above)
-    const topExtent = this.height * this.verticalExtent;
-    let yOffset = this.mainAxisY - 60;
-    line.historicalEvents.forEach((event, i) => {
-      const y = yOffset - i * 45;
-      if (y > this.mainAxisY - topExtent + 30) {
-        this.showEventText(event.title, null, x, y, 'historical');
+
+    // Hovered year: full info (year label + event text)
+    // Nearby years (±5): only year label (event nodes already glow via drawEventNodes)
+    const nearbyRadius = 5;
+    const hoveredLine = this.hoveredYear;
+    const hoveredX = this.getYearLineX(hoveredLine.yearIndex);
+    const hoveredScale = this.currentScales[hoveredLine.year] || 1.0;
+    const hoveredExtent = this.height * this.verticalExtent * hoveredScale * 0.6;
+    const hoveredSpacing = 50 * hoveredScale;
+
+    // Hovered year: full label + event text
+    this.showYearLabel(hoveredLine.year, hoveredX, 1.0);
+
+    const baseYH = this.mainAxisY - 80 * hoveredScale;
+    hoveredLine.historicalEvents.forEach((event, i) => {
+      const y = baseYH - i * hoveredSpacing;
+      const maxY = this.mainAxisY - hoveredExtent + 20;
+      if (y > maxY) {
+        this.showEventText(event.title, null, hoveredX, y, 'historical', i, hoveredLine.year, 1.0);
       }
     });
-    
-    // Personal events (below)
-    yOffset = this.mainAxisY + 60;
-    line.personalEvents.forEach((event, i) => {
-      const y = yOffset + i * 45;
-      if (y < this.mainAxisY + topExtent - 30) {
-        this.showEventText(event.action, event.person, x, y, 'personal');
+
+    const baseYP = this.mainAxisY + 80 * hoveredScale;
+    hoveredLine.personalEvents.forEach((event, i) => {
+      const y = baseYP + i * hoveredSpacing;
+      const maxY = this.mainAxisY + hoveredExtent - 20;
+      if (y < maxY) {
+        this.showEventText(event.action, event.person, hoveredX, y, 'personal', i, hoveredLine.year, 1.0);
       }
     });
+
+    // Nearby years: year label in staircase layout (farther = lower + more transparent)
+    const stepHeight = 22;
+    for (const line of this.yearLines) {
+      if (!line.hasEvents) continue;
+      const dist = Math.abs(line.year - hoveredLine.year);
+      if (dist === 0 || dist > nearbyRadius) continue;
+      const opacity = Math.max(0.15, 1 - dist / (nearbyRadius + 1));
+      const x = this.getYearLineX(line.yearIndex);
+      const yOffset = dist * stepHeight;
+      this.showYearLabel(line.year, x, opacity, yOffset);
+    }
   }
   
-  showYearLabel(year, x) {
+  showYearLabel(year, x, opacity = 1, yOffset = 0) {
     const label = document.createElement('div');
     label.className = 'year-label';
     label.textContent = year;
     label.style.left = x + 'px';
-    label.style.top = (this.mainAxisY + 8) + 'px';
+    label.style.top = (this.mainAxisY + 8 + yOffset) + 'px';
+    label.style.opacity = '0';
+    label.dataset.targetOpacity = String(opacity);
+    label.dataset.yearKey = String(year);
+    label.dataset.yOffset = String(yOffset);
     this.container.appendChild(label);
     this.eventElements.push(label);
     
-    requestAnimationFrame(() => label.classList.add('visible'));
+    requestAnimationFrame(() => {
+      label.style.opacity = String(opacity);
+      label.style.transition = 'opacity 0.25s ease-out';
+    });
   }
   
-  showEventText(title, person, x, y, type) {
+  showEventText(title, person, x, y, type, index, yearKey, opacity = 1) {
     const el = document.createElement('div');
     el.className = `event-text ${type}`;
+    
+    el.style.position = 'absolute';
     el.style.left = x + 'px';
     el.style.top = y + 'px';
-    el.style.transform = `translate(-50%, ${type === 'historical' ? '0' : '-100%'})`;
+    el.style.transform = type === 'historical'
+      ? 'translate(-50%, 10px)'
+      : 'translate(-50%, calc(-100% - 10px))';
+    el.style.opacity = '0';
     
     if (person) {
       el.innerHTML = `<div class="person">${person}</div><div class="title">${title}</div>`;
     } else {
       el.innerHTML = `<div class="title">${title}</div>`;
     }
+
+    el.dataset.type = type;
+    el.dataset.index = String(index);
+    el.dataset.yearKey = String(yearKey);
+    el.dataset.targetOpacity = String(opacity);
     
     this.container.appendChild(el);
     this.eventElements.push(el);
     
-    requestAnimationFrame(() => el.classList.add('visible'));
+    requestAnimationFrame(() => {
+      el.style.opacity = String(opacity);
+      el.style.transition = 'opacity 0.3s ease-out';
+    });
+  }
+
+  // Keep ALL event texts locked to their node positions each frame
+  positionEventTexts() {
+    if (!this.hoveredYear || this.eventElements.length === 0) return;
+
+    for (const el of this.eventElements) {
+      const yearKey = Number(el.dataset.yearKey);
+      const line = this.yearLines.find(l => l.year === yearKey);
+      if (!line) continue;
+
+      const x = this.getYearLineX(line.yearIndex);
+      const scale = this.currentScales[yearKey] || 1.0;
+      const extent = this.height * this.verticalExtent * scale * 0.6;
+      const spacing = 50 * scale;
+
+      if (el.classList.contains('year-label')) {
+        const yOff = Number(el.dataset.yOffset || 0);
+        el.style.left = x + 'px';
+        el.style.top = (this.mainAxisY + 8 + yOff) + 'px';
+        continue;
+      }
+
+      const type = el.dataset.type;
+      const idx = Number(el.dataset.index || 0);
+      if (type === 'historical') {
+        const y = this.mainAxisY - 80 * scale - idx * spacing;
+        const maxY = this.mainAxisY - extent + 20;
+        el.style.left = x + 'px';
+        el.style.top = y + 'px';
+        el.style.display = y > maxY ? 'block' : 'none';
+      } else if (type === 'personal') {
+        const y = this.mainAxisY + 80 * scale + idx * spacing;
+        const maxY = this.mainAxisY + extent - 20;
+        el.style.left = x + 'px';
+        el.style.top = y + 'px';
+        el.style.display = y < maxY ? 'block' : 'none';
+      }
+    }
   }
   
   clearEventTexts() {
@@ -233,8 +453,45 @@ class Mnemos {
     const deltaTime = (currentTime - this.lastTime) / 1000;
     this.lastTime = currentTime;
     this.time += deltaTime;
-    
+
+    // Ease zoom (ease-in-out feel)
+    this.zoomScale += (this.zoomTarget - this.zoomScale) * this.zoomEase;
+    this.yearWidth = this.baseYearWidth * this.zoomScale;
+
+    // Keep mouse anchor fixed while zooming (prevents left-right drifting)
+    if (this.zoomAnchorIndex !== null && this.zoomAnchorX !== null) {
+      this.panOffset = this.padding.left + this.zoomAnchorIndex * this.yearWidth - this.zoomAnchorX;
+      const [panMin, panMax] = this.getPanBounds();
+      this.panOffset = Math.max(panMin, Math.min(panMax, this.panOffset));
+
+      const zoomSettled = Math.abs(this.zoomTarget - this.zoomScale) < 0.0008;
+      if (performance.now() > this.zoomGestureUntil && zoomSettled) {
+        this.zoomAnchorIndex = null;
+        this.zoomAnchorX = null;
+      }
+    }
+
+    // Pan velocity decay (physical, weighted)
+    if (!this.isDragging && Math.abs(this.panVelocity) > 0.5) {
+      this.panOffset += this.panVelocity * deltaTime * 60;
+      this.panVelocity *= this.panDecay;
+      const [panMin, panMax] = this.getPanBounds();
+      this.panOffset = Math.max(panMin, Math.min(panMax, this.panOffset));
+      if (this.panOffset <= panMin || this.panOffset >= panMax) this.panVelocity = 0;
+    }
+
+    // Keep hover fully disabled during zoom, then restore automatically
+    if (this.isZooming()) {
+      if (this.hoveredYear) {
+        this.hoveredYear = null;
+        this.clearEventTexts();
+      }
+    } else if (!this.isDragging) {
+      this.updateHoveredYear();
+    }
+
     this.draw();
+    this.positionEventTexts();
     requestAnimationFrame((t) => this.animate(t));
   }
   
@@ -301,7 +558,7 @@ class Mnemos {
   
   drawHoverEnergyField() {
     const ctx = this.ctx;
-    const x = this.hoveredYear.x;
+    const x = this.getYearLineX(this.hoveredYear.yearIndex);
     const extent = this.height * this.verticalExtent;
     
     // Vertical energy column - gold tint
@@ -423,49 +680,47 @@ class Mnemos {
   }
 
   drawYearLines() {
-    const ctx = this.ctx;
-    
     for (const line of this.yearLines) {
+      // Skip drawing year lines that have no events (leave empty space)
+      if (!line.hasEvents) continue;
       this.drawYearLine(line);
     }
   }
 
   drawYearLine(line) {
     const ctx = this.ctx;
-    const x = line.x;
+    const x = this.getYearLineX(line.yearIndex);
     const extent = this.height * this.verticalExtent;
-    
-    // Calculate current line state
+
     const isHovered = this.hoveredYear === line;
-    const isNearHovered = this.hoveredYear && 
-      Math.abs(line.year - this.hoveredYear.year) <= 2 &&
-      Math.abs(line.year - this.hoveredYear.year) > 0;
-    
-    // Calculate flicker and pulse - multi-layer randomness
+    const hoverDist = this.hoveredYear ? Math.abs(line.year - this.hoveredYear.year) : Infinity;
+    const isNearHovered = this.hoveredYear && hoverDist > 0 && hoverDist <= 5;
+    const isFocusYear = line.year === this.focusYear;
+
+    // Flicker and pulse (150–300ms feel via speed); empty years still flicker
     const flicker1 = Math.sin(this.time * line.flickerSpeed + line.phase) * 0.12;
     const flicker2 = Math.sin(this.time * line.flickerSpeed * 1.7 + line.phase * 0.5) * 0.06;
     const pulse = Math.sin(this.time * line.pulseSpeed) * 0.08;
-    
-    // Random flash - occasional bright flash
     const randomFlash = Math.random() < 0.001 ? 0.3 : 0;
-    
-    // Base intensity
+
     let targetIntensity = line.baseIntensity + flicker1 + flicker2 + pulse + randomFlash;
-    
-    // Target scale - hover makes it bigger, others stay small
     let targetScale = 1.0;
-    
-    // Adjust based on hover state
+
     if (isHovered) {
       targetIntensity = 1.0;
-      targetScale = 1.8; // Enlarge hovered line
+      targetScale = 1.8;
     } else if (isNearHovered) {
-      const dist = Math.abs(line.year - this.hoveredYear.year);
-      targetIntensity = 0.5 - dist * 0.12;
-      targetScale = 1.0 + (0.3 / dist); // Slightly larger for adjacent
+      // Nearby years glow with smooth falloff (closer = brighter)
+      const t = 1 - hoverDist / 6;
+      targetIntensity = Math.max(targetIntensity, 0.25 + 0.45 * t);
+      targetScale = 1.0 + 0.3 * t;
     } else if (this.hoveredYear) {
-      targetIntensity *= 0.2; // Other lines dim
-      targetScale = 0.7; // Shrink non-hovered lines
+      // Dim all other years when hovering
+      targetIntensity *= 0.12;
+      targetScale = 0.7;
+    } else if (isFocusYear) {
+      // Temporal focus: subtle brighter presence when no hover
+      targetIntensity = Math.min(1, targetIntensity + this.focusIntensityBoost);
     }
     
     // Smooth transition for intensity
@@ -558,82 +813,89 @@ class Mnemos {
 
   drawEventNodes(line, type, intensity, isHovered, scale) {
     const ctx = this.ctx;
-    const x = line.x;
+    const lineX = this.getYearLineX(line.yearIndex);
     const events = type === 'historical' ? line.historicalEvents : line.personalEvents;
-    
+
     if (events.length === 0) return;
-    
-    // Color config - silver (historical) vs gold (personal)
-    const colors = type === 'historical' 
-      ? { r: 170, g: 175, b: 190, r2: 200, g2: 205, b2: 220 }   // Silver cool
-      : { r: 210, g: 175, b: 120, r2: 240, g2: 210, b2: 160 };  // Gold warm
-    
-    // Position config
+
+    // When hovering, only show event nodes for the hovered year and its nearby neighbors
+    if (this.hoveredYear) {
+      const dist = Math.abs(line.year - this.hoveredYear.year);
+      if (dist > 5) return;
+    }
+
+    // Event nodes are placed directly on the year line (no horizontal offset)
+    const x = lineX;
+
+    const colors = type === 'historical'
+      ? { r: 170, g: 175, b: 190, r2: 200, g2: 205, b2: 220 }
+      : { r: 210, g: 175, b: 120, r2: 240, g2: 210, b2: 160 };
+
     const extent = this.height * this.verticalExtent * scale * 0.6;
-    const baseY = type === 'historical' 
-      ? this.mainAxisY - 35 * scale
-      : this.mainAxisY + 35 * scale;
+    // Increased offset from year label: 80px instead of 35px (more breathing room)
+    const baseY = type === 'historical'
+      ? this.mainAxisY - 80 * scale
+      : this.mainAxisY + 80 * scale;
     const direction = type === 'historical' ? -1 : 1;
-    const spacing = isHovered ? 45 * scale : 30 * scale;
-    
+    const spacing = isHovered ? 50 * scale : 35 * scale;
+
     events.forEach((event, i) => {
       const y = baseY + direction * i * spacing;
-      
-      // Check bounds
-      const maxY = type === 'historical' 
+
+      const maxY = type === 'historical'
         ? this.mainAxisY - extent + 20
         : this.mainAxisY + extent - 20;
       if ((type === 'historical' && y < maxY) || (type === 'personal' && y > maxY)) {
         return;
       }
-      
-      const eventIntensity = event.intensity || 0.7;
-      
-      // Node flicker
-      const flicker1 = Math.sin(this.time * (1.0 + i * 0.3) + line.phase) * 0.15;
-      const flicker2 = Math.sin(this.time * (1.8 + i * 0.2) + line.phase * 1.5) * 0.08;
-      const pulse = Math.sin(this.time * 0.6 + i) * 0.1;
-      
-      let nodeIntensity = intensity * eventIntensity + (flicker1 + flicker2 + pulse) * 0.25;
-      
+
+      // Event weight: node size, glow, pulse, flicker (no labels)
+      const w = event.weight ?? event.intensity ?? 0.7;
+      const eventIntensity = event.intensity ?? 0.7;
+
+      const flickerAmp = 0.15 * w + 0.05;
+      const pulseAmp = 0.1 * w + 0.05;
+      const flicker1 = Math.sin(this.time * (1.0 + i * 0.3) + line.phase) * flickerAmp;
+      const flicker2 = Math.sin(this.time * (1.8 + i * 0.2) + line.phase * 1.5) * (flickerAmp * 0.5);
+      const pulse = Math.sin(this.time * 0.6 + i) * pulseAmp;
+
+      let nodeIntensity = intensity * eventIntensity + (flicker1 + flicker2 + pulse) * (0.2 + 0.15 * w);
+
       if (isHovered) {
         nodeIntensity = Math.min(1, eventIntensity + 0.35);
       }
-      
-      // Connection line gradient
+
       const connGradient = ctx.createLinearGradient(x, this.mainAxisY, x, y);
       connGradient.addColorStop(0, `rgba(${colors.r}, ${colors.g}, ${colors.b}, ${nodeIntensity * 0.08})`);
       connGradient.addColorStop(1, `rgba(${colors.r}, ${colors.g}, ${colors.b}, ${nodeIntensity * 0.4})`);
-      
+
       ctx.beginPath();
       ctx.moveTo(x, this.mainAxisY + direction * 4);
       ctx.lineTo(x, y);
       ctx.strokeStyle = connGradient;
-      ctx.lineWidth = isHovered ? 1.5 * scale : 0.8 * scale;
+      ctx.lineWidth = (isHovered ? 1.5 : 0.8) * scale * (0.6 + 0.4 * w);
       ctx.stroke();
-      
-      // Node size
-      const nodeRadius = (isHovered ? 5 : 3) * scale;
-      
-      // Outer glow
-      const glowRadius = nodeRadius * 3.5;
+
+      const baseRadius = (isHovered ? 5 : 3) * scale;
+      const nodeRadius = baseRadius * (0.55 + 0.45 * w);
+
+      const glowRadius = nodeRadius * (3 + 0.5 * w);
+      const weightBoost = 0.75 + 0.25 * w;
       const outerGlow = ctx.createRadialGradient(x, y, 0, x, y, glowRadius);
-      outerGlow.addColorStop(0, `rgba(${colors.r2}, ${colors.g2}, ${colors.b2}, ${nodeIntensity * 0.25})`);
-      outerGlow.addColorStop(0.5, `rgba(${colors.r}, ${colors.g}, ${colors.b}, ${nodeIntensity * 0.08})`);
+      outerGlow.addColorStop(0, `rgba(${colors.r2}, ${colors.g2}, ${colors.b2}, ${nodeIntensity * 0.25 * weightBoost})`);
+      outerGlow.addColorStop(0.5, `rgba(${colors.r}, ${colors.g}, ${colors.b}, ${nodeIntensity * 0.08 * weightBoost})`);
       outerGlow.addColorStop(1, `rgba(${colors.r}, ${colors.g}, ${colors.b}, 0)`);
-      
+
       ctx.beginPath();
       ctx.arc(x, y, glowRadius, 0, Math.PI * 2);
       ctx.fillStyle = outerGlow;
       ctx.fill();
-      
-      // Inner glow
+
       ctx.beginPath();
       ctx.arc(x, y, nodeRadius * 1.6, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${colors.r2}, ${colors.g2}, ${colors.b2}, ${nodeIntensity * 0.18})`;
+      ctx.fillStyle = `rgba(${colors.r2}, ${colors.g2}, ${colors.b2}, ${nodeIntensity * 0.18 * weightBoost})`;
       ctx.fill();
-      
-      // Core
+
       ctx.beginPath();
       ctx.arc(x, y, nodeRadius, 0, Math.PI * 2);
       const coreGradient = ctx.createRadialGradient(x, y, 0, x, y, nodeRadius);
@@ -642,19 +904,17 @@ class Mnemos {
       coreGradient.addColorStop(1, `rgba(${colors.r}, ${colors.g}, ${colors.b}, ${nodeIntensity * 0.6})`);
       ctx.fillStyle = coreGradient;
       ctx.fill();
-      
-      // Highlight center
+
       ctx.beginPath();
       ctx.arc(x, y, nodeRadius * 0.25, 0, Math.PI * 2);
       ctx.fillStyle = `rgba(255, 255, 250, ${nodeIntensity * 0.9})`;
       ctx.fill();
-      
-      // Pulse ring on hover
+
       if (isHovered) {
         const ringPhase = (this.time * 1.8 + i * 0.5) % 1;
-        const ringRadius = nodeRadius + ringPhase * 12 * scale;
+        const ringRadius = nodeRadius + ringPhase * 12 * scale * w;
         const ringAlpha = (1 - ringPhase) * 0.35 * nodeIntensity;
-        
+
         ctx.beginPath();
         ctx.arc(x, y, ringRadius, 0, Math.PI * 2);
         ctx.strokeStyle = `rgba(${colors.r2}, ${colors.g2}, ${colors.b2}, ${ringAlpha})`;
